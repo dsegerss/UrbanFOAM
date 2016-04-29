@@ -1,0 +1,8 @@
+/build/
+/dist/
+/pyAirviro.egg-info/
+/setuptools-*.tar.gz
+/*.egg
+*.pyc
+*.pyo
+*~
