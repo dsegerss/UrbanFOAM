@@ -146,12 +146,12 @@ def create_roads_table(con, cur, epsg):
         '''
         CREATE TABLE roads (
         id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-        patch VARCHAR(100) DEFAULT 'roads',
+        patch INTEGER NOT NULL DEFAULT 3,
         source INTEGER,
         height_ref INTEGER DEFAULT 0,
         from_height REAL,
         to_height REAL,
-        FOREIGN KEY (patch) REFERENCES patches (name) ON UPDATE CASCADE
+        FOREIGN KEY (patch) REFERENCES patches (id)
         );
         '''
     )
@@ -170,11 +170,11 @@ def create_structures_table(con, cur, epsg):
         '''
         CREATE TABLE structures (
         id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-        patch VARCHAR(100) DEFAULT 'buildings',
+        patch INTEGER NOT NULL DEFAULT 2,
         height_ref INTEGER DEFAULT 1,
         from_height REAL,
         to_height REAL,
-        FOREIGN KEY (patch) REFERENCES patches (name) ON UPDATE CASCADE
+        FOREIGN KEY (patch) REFERENCES patches (id)
         );
         '''
     )
@@ -218,7 +218,8 @@ def create_tables(con, cur, epsg):
     cur.execute(
         '''
         CREATE TABLE patches (
-        name VARCHAR(100) PRIMARY KEY NOT NULL
+        id INTEGER PRIMARY KEY,
+        name VARCHAR(100) NOT NULL
         );
         '''
     )
@@ -228,11 +229,11 @@ def create_tables(con, cur, epsg):
         INSERT INTO patches (name) VALUES (:name)
         ''',
         [
-            {'name': 'buildings'},
-            {'name': 'water'},
-            {'name': 'terrace'},
-            {'name': 'roads'},
-            {'name': 'chimneys'}
+            {'id': 1, 'name': 'water'},
+            {'id': 2, 'name': 'buildings'},
+            {'id': 3, 'name': 'roads'},
+            {'id': 4, 'name': 'terrace'},
+            {'id': 5, 'name': 'chimneys'}
         ]
     )
 

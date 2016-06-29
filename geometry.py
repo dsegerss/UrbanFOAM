@@ -177,7 +177,7 @@ def extrude_and_triangulate_patch(structure, terrain):
 
     # set elevation of internal faces
     # depends on height_ref of structures
-    tin = structure.triangulate()
+    tin = structure.triangulate(upward=False)
     if structure.height_ref == HEIGHT_REF['ground']:
         # set elevation relative to ground
         tin = set_tin_elevation(
@@ -669,7 +669,11 @@ def make_triangle(p1, p2, p3):
         if isinstance(p, ogr.Geometry):
             ring.AddPoint(p.GetX(), p.GetY(), p.GetZ())
         elif hasattr(p, '__iter__'):
-            ring.AddPoint(*p[:3])
+            try:
+                ring.AddPoint(*p[:3])
+            except TypeError:
+                import pdb;pdb.set_trace()
+                
     ring.CloseRings()
     tri.AddGeometry(ring)
     return tri
@@ -988,7 +992,9 @@ class Polygon(object):
     def __init__(self, polygon_wkb, id=None):
         self._poly = ogr.CreateGeometryFromWkb(polygon_wkb)
         if self._poly is None or not self._poly.IsValid():
+            import pdb;pdb.set_trace()
             raise ValueError('Invalid geometry')
+
         geom_type = self._poly.GetGeometryName()
         if geom_type != 'POLYGON':
             raise TypeError(
@@ -1208,7 +1214,7 @@ class Polygon(object):
                 tin += clip_ear2(points)
         return tin
 
-    def triangulate(self):
+    def triangulate(self, upward=True, precision=3):
         """Triangulate polygon, return list of triangles."""
 
         tin = []
@@ -1216,22 +1222,32 @@ class Polygon(object):
             for i in range(self._poly.GetGeometryCount()):
                 p = self._poly.GetGeometryRef(i)
                 poly = Polygon(p.ExportToWkb(), self.id)
-                tin += poly.triangulate()
+                tin += poly.triangulate(precision=precision)
         else:
-            triangle_tin = self.constrained_delaunay()
+            triangle_tin = self.constrained_delaunay(precision=precision)
             for tri in triangle_tin['triangles']:
                 v1, v2, v3 = triangle_tin['vertices'][tri]
                 z1, z2, z3 = triangle_tin['elevations'][tri]
-                tin.append(
-                    make_triangle(
-                        (v1[0], v1[1], z1),
-                        (v2[0], v2[1], z2),
-                        (v3[0], v3[1], z3)
+                if upward:
+                    tin.append(
+                        make_triangle(
+                            (v1[0], v1[1], z1),
+                            (v2[0], v2[1], z2),
+                            (v3[0], v3[1], z3)
+                        )
                     )
-                )
+                else:
+                    tin.append(
+                        make_triangle(
+                            (v2[0], v2[1], z2),
+                            (v1[0], v1[1], z1),
+                            (v3[0], v3[1], z3)
+                        )
+                    )
+                
         return tin
 
-    def PSLG(self, precision=2, max_segment_length=None, holes=True):
+    def PSLG(self, precision=3, max_segment_length=None, holes=True):
         pslg = {}
 
         if holes and self.has_holes():
@@ -1384,7 +1400,7 @@ class Polygon(object):
             np.hstack((vertices[:, 2], internal_elevations.flatten()))
         )
 
-    def constrained_delaunay(self, precision=2, max_segment_length=None):
+    def constrained_delaunay(self, precision=3, max_segment_length=None):
         pslg, elevations = self.PSLG(
             precision=precision, max_segment_length=max_segment_length
         )
@@ -1458,7 +1474,8 @@ class Structure(Polygon):
                     'have z-coordinates and no to_height is specified'
                 )
             return point[2]
-        elif self.height_ref == HEIGHT_REF['ground']:
+        elif (self.height_ref == HEIGHT_REF['ground']
+              or self.height_ref is None):
             return terrain.sample(
                 point[0], point[1]) + self._to_height
         elif self.height_ref == HEIGHT_REF['max ground elevation']:
@@ -1557,7 +1574,7 @@ class Structure(Polygon):
         # self.remove_holes()
 
         # set elevation for interior faces
-        internal_tin = self.triangulate()
+        internal_tin = self.triangulate(upward=False)
 
         tin = []
         for tri in internal_tin:
@@ -1567,6 +1584,9 @@ class Structure(Polygon):
             to_points = [
                 list(p) for p in tri.GetGeometryRef(0).GetPoints()[:3]
             ]
+
+            to_points.reverse()
+
             for p in from_points:
                 p[2] = self.from_height(terrain, p)
             for p in to_points:
@@ -1583,8 +1603,8 @@ class Structure(Polygon):
                 p2 = (p2[0], p2[1], self.from_height(terrain, p2))
                 p1_extruded = (p1[0], p1[1], self.to_height(terrain, p1))
                 p2_extruded = (p2[0], p2[1], self.to_height(terrain, p2))
-                tin.append(make_triangle(p1, p2, p1_extruded))
-                tin.append(make_triangle(p1_extruded, p2, p2_extruded))
+                tin.append(make_triangle(p2, p1, p1_extruded))
+                tin.append(make_triangle(p2_extruded, p2, p1_extruded))
         return tin
 
 
@@ -1620,7 +1640,7 @@ class Road(Structure):
                 ' with id: %i: invalid geometry' % id
             )
 
-    def get_centreline(self, edb_con):
+    def get_centreline(self, edb_con, translate=None):
         recs = edb_con.execute(
             """
             SELECT id, name, speed, ST_AsText(geom) as wkt, nolanes, vehicles
@@ -1631,7 +1651,13 @@ class Road(Structure):
         
         if len(recs) == 0:
             raise ValueError('No road with id %i found i edb' % self.sourceid)
-        points = ogr.CreateGeometryFromWkt(recs[0]['wkt']).GetPoints()
+        points = np.array(
+            ogr.CreateGeometryFromWkt(recs[0]['wkt']).GetPoints()
+        )
+
+        if translate is not None:
+            points[:, 0] += translate[0]
+            points[:, 1] += translate[1]
 
         centreline = {
             'id': self.sourceid,
@@ -1640,7 +1666,7 @@ class Road(Structure):
             'nolanes': recs[0]['nolanes'],
             'vehicles': recs[0]['vehicles'],
             'points': '(' + ' '.join(
-                ['(%f %f 0)' % (p[0], p[1]) for p in points]
+                ['(%f %f 0)' % (p[0], p[1]) for p in points[:, :2]]
             ) + ')'
         }
 

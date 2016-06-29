@@ -71,6 +71,7 @@ class UrbanFOAMTerrainTests(unittest.TestCase):
         terrain.read('data/terrain.asc')
         avg_hgt = terrain._get_boundary_height()
         terrain.buffer(BUFFER, FLAT_BUFFER_FRACTION)
+        terrain.write('/home/a001080/tmp/terrain.tif')
         self.assertEqual(terrain.data[0, 0], avg_hgt)
         
         

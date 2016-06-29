@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 from __future__ import division
 
 import numpy as np
+from scipy.interpolate import griddata
 from osgeo import osr
 from osgeo import gdal
 from osgeo import ogr
@@ -78,6 +79,7 @@ def create_geometry_mask(geom, shape, srs_wkt, geotransform, invert=False):
     feat = ogr.Feature(tmp_lyr.GetLayerDefn())
     feat.SetGeometry(geom)
     tmp_lyr.CreateFeature(feat)
+    tmp_ds.FlushCache()
     err = gdal.RasterizeLayer(mask, [1], tmp_lyr, burn_values=[burn_value])
     if err != 0:
         raise ValueError(
@@ -365,13 +367,19 @@ class Terrain(object):
         x0 = xi[obs_point_mask]
         y0 = yi[obs_point_mask]
         z0 = self.data[obs_point_mask]
-        
+
         xi_buffer = xi[buffer_mask]
         yi_buffer = yi[buffer_mask]
 
-        # Interpolate and apply result
-        zi_buffer = simple_idw(x0, y0, z0, xi_buffer, yi_buffer)
-        self.data[buffer_mask] = zi_buffer
+        data = griddata(np.vstack((x0, y0)).T, z0, (xi, yi), method='linear')
+        self.data[buffer_mask] = data[buffer_mask]
+
+        nan_mask = np.isnan(self.data)
+        self.data[nan_mask] = np.interp(
+            np.flatnonzero(nan_mask),
+            np.flatnonzero(~nan_mask),
+            self.data[~nan_mask]
+        )
 
     @property
     def geotransform(self):

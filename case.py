@@ -9,6 +9,7 @@ from __future__ import unicode_literals
 import os
 from os import path
 from itertools import combinations
+from operator import attrgetter
 
 from osgeo import osr
 from osgeo import ogr
@@ -39,9 +40,7 @@ class Case(object):
 
     def __init__(self, domain=None, terrain=None, structures=None,
                  roads=None, point_sources=None, area_sources=None, srs=None,
-                 buffer=DEFAULTS['buffer'],
-                 buffer_flat_fraction=DEFAULTS['buffer_flat_fraction'],
-                 domain_height=DEFAULTS['domain_height']):
+                 buffer=None, buffer_flat_fraction=None, domain_height=None):
 
         """Initialize Domain object.
         @param domain: Polygon object representing domain
@@ -54,15 +53,22 @@ class Case(object):
         @param buffer: domain buffer width
         """
         self.srs = srs
-        self.buffer_flat_fraction = buffer_flat_fraction
-        self.domain_height = domain_height
-        self.buffer = buffer
+        self.buffer_flat_fraction = buffer_flat_fraction or \
+            DEFAULTS['buffer_flat_fraction']
+        self.domain_height = domain_height or DEFAULTS['domain_height']
+        self.buffer = buffer or DEFAULTS['buffer']
         self.domain = domain
         self.roads = roads or []
         self.structures = structures or []
         self.point_sources = point_sources or []
         self.area_sources = area_sources or []
         self.terrain = terrain
+
+        for key, default_value in DEFAULTS.iteritems():
+            if not hasattr(self, key):
+                setattr(self, key, default_value)
+            elif attrgetter(key)(self) is None:
+                setattr(self, key, default_value)
 
     @property
     def srs(self):
@@ -92,7 +98,15 @@ class Case(object):
                 self._domain.poly,
                 self.buffer * (1 - self.buffer_flat_fraction)
             )
-
+            
+    def distance_to_origo(self):
+        """Return distance from domain centroid to origo."""
+        if self.domain is None:
+            return (0, 0)
+        dist = self.domain._poly.Centroid().GetPoint()[:2]
+        dist = map(int, dist)
+        return (-1 * dist[0], -1 * dist[1])
+        
     def create_case(self, casepath):
         if not path.exists(casepath):
             try:
@@ -107,6 +121,15 @@ class Case(object):
             except:
                 raise IOError(
                     'Could not create costant directory %s' % constant_dir
+                )
+
+        triSurface_dir = path.join(casepath, 'constant', 'triSurface')
+        if not path.exists(triSurface_dir):
+            try:
+                os.mkdir(triSurface_dir)
+            except:
+                raise IOError(
+                    'Could not create directory %s' % triSurface_dir
                 )
         
     def read(self, con):
@@ -155,7 +178,7 @@ class Case(object):
                             )
                         )
 
-    def to_stl(self, outdir):
+    def to_stl(self, outdir, translate=None):
         """ Write stl files for domain, structures, roads and sources."""
 
         if self.terrain is None:
@@ -170,7 +193,7 @@ class Case(object):
         domain_stl = MultiStl()
 
         # extrude interior triangles to form upper boundary
-        internal_tin = domain.triangulate()
+        internal_tin = domain.triangulate(upward=True)
         top_tin = []
 
         # set elevation of upper boundary
@@ -198,20 +221,30 @@ class Case(object):
 
             p1_extruded = (x1, y1, domain_height)
             p2_extruded = (x2, y2, domain_height)
-            side_tin.append(make_triangle(p1, p2, p1_extruded))
-            side_tin.append(make_triangle(p1_extruded, p2, p2_extruded))
+            side_tin.append(make_triangle(p2, p1, p1_extruded))
+            side_tin.append(make_triangle(p2_extruded, p2, p1_extruded))
             
             # segment direction vector
             vec = np.array(p2[:2]) - np.array(p1[:2])
             x, y = vec
-            vec_normal = np.array([y, -x])  # rotate 90 degrees clockwise
+            vec_normal = np.array([-y, x])  # rotate 90 degrees clockwise
 
             # anti-clockwise angle from north
             vec_normal_angle = np.arctan2(
                 vec_normal[1], vec_normal[0]) * 180 / np.pi - 90
-            
-            group_name = 'side_%i' % int(vec_normal_angle)
+
+            vec_normal_angle *= -1
+
+            if vec_normal_angle < 0:
+                vec_normal_angle += 360
+            if vec_normal_angle >= 360:
+                vec_normal_angle -= 360
+
+            group_name = 'side%i' % int(vec_normal_angle)
             domain_stl.add_solid(group_name, side_tin)
+
+        if translate is not None:
+            domain_stl.move(*translate)
         domain_stl.write(path.join(outdir, 'domain.stl'))
 
         # dividing structures into patches (zero thickness) and buildings
@@ -258,7 +291,7 @@ class Case(object):
                     patch.height_ref == HEIGHT_REF['ground']):
                 # ground following non-elevated patch
                 structure_tin = set_tin_elevation(
-                    patch.triangulate(), terrain=self.terrain
+                    patch.triangulate(upward=False), terrain=self.terrain
                 )
                 ground_stl.add_solid(patch.patch, structure_tin)
             else:
@@ -271,9 +304,11 @@ class Case(object):
                 ground_stl.add_solid(patch.patch, structure_tin)
 
         # domain.remove_holes()
-        ground_tin = domain.triangulate()
+        ground_tin = domain.triangulate(upward=False)
         ground_tin = set_tin_elevation(ground_tin, terrain=self.terrain)
         ground_stl.add_solid('ground', ground_tin)
+        if translate is not None:
+            ground_stl.move(*translate)
         ground_stl.write(path.join(outdir, 'ground.stl'))
         
         structure_stl = MultiStl()
@@ -282,16 +317,24 @@ class Case(object):
             structure_stl.add_solid(b.patch or 'structure_%i' % b.id, tin)
 
         if len(buildings) > 0:
+            if translate is not None:
+                structure_stl.move(*translate)
             structure_stl.write(path.join(outdir, 'structures.stl'))
 
         road_stl = MultiStl()
         for road in self.roads:
             road_tin = road.extrude(self.terrain)
-            road_stl.add_solid(road.patch or 'road_%i' % road.id, road_tin)
+            road_stl.add_solid(
+                road.patch or 'road_%i' % road.sourceid,
+                road_tin
+            )
 
         if len(self.roads) > 0:
-            road_stl.write(path.join(outdir, 'roads.stl'))
-                
+            if translate is not None:
+                road_stl.move(*translate)
+            road_stl.write(path.join(outdir, 'roads'), single=True)
+            road_stl.write(path.join(outdir, 'roads.stl'), single=False)
+
     @property
     def terrain(self):
         return self._terrain
@@ -310,7 +353,7 @@ class Case(object):
         terrain.read(filename)
         self.terrain = terrain
 
-    def read_settings(self, con):
+    def read_settings(self, con, **kwargs):
         recs = con.execute(
             """
             SELECT * from settings
@@ -323,7 +366,12 @@ class Case(object):
             
         # get general settings for domain
         for key, default_value in DEFAULTS.iteritems():
-            setattr(self, key, rec_dict.get(key, default_value))
+            if hasattr(self, key):
+                value = attrgetter(key)(self)
+                if value is None:
+                    setattr(self, key, rec_dict.get(key, default_value))
+            else:
+                setattr(self, key, rec_dict.get(key, default_value))
 
     def read_domain(self, con):
         """Extract domain from db."""
@@ -348,11 +396,16 @@ class Case(object):
         # only retrieve features within domain boundaries
         structures = con.execute(
             """
-            SELECT id, patch, height_ref,
-                from_height, to_height,
-            ST_AsBinary(ST_Intersection(geom, ST_GeomFromText('{wkt}'))) as wkb
-            FROM structures
+            SELECT s.id, p.name as patch, s.height_ref,
+                s.from_height, s.to_height,
+            ST_AsBinary(
+                ST_Intersection(s.geom, ST_GeomFromText('{wkt}'))
+            ) as wkb
+            FROM structures as s
+            JOIN patches as p
+            ON p.id=s.patch
             WHERE ST_Intersects(geom, ST_GeomFromText('{wkt}'))
+
             """.format(wkt=self.domain._poly.ExportToWkt())
             )
 
@@ -369,7 +422,7 @@ class Case(object):
                             geom.GetGeometryRef(i).ExportToWkb(),
                             id=rec['id'],
                             patch=rec['patch'],
-                            hight_ref=rec['height_ref'] or 1,
+                            height_ref=rec['height_ref'] or 1,
                             from_height=rec['from_height'],
                             to_height=rec['to_height']
                         )
@@ -460,15 +513,32 @@ class Case(object):
 
     def read_area_sources(self, con):
         pass
-        
-    def write_traffic_dict(self, edb_con, emis_group_fractions, filename):
+    
+    def write_landuse_dict(self, filename):
+        x, y = self.distance_to_origo()
+        header = ofdict.DICT_HEADER.format(filename='landuseDict')
+        content = ofdict.LANDUSE_DICT_TEMPLATE.format(
+            subtractedX=x,
+            subtractedY=y
+        )
+        with open(filename, 'w') as outfile:
+            outfile.write(
+                header + content
+            )
+
+    def write_traffic_dict(self, edb_con, emis_grp_fractions, filename,
+                           translate=None):
         road_names = []
         centrelines = []
         road_properties = []
         road_classification = []
 
+        road_name_index = 0
         for road in self.roads:
-            centreline = road.get_centreline(edb_con)
+            centreline = road.get_centreline(
+                edb_con,
+                translate=translate
+            )
 
             road_names.append('road_%i' % road.sourceid)
             centrelines.append(centreline['points'])
@@ -477,17 +547,18 @@ class Case(object):
             )
 
             road_classification.append(
-                '({id} 0 {LDV_weight})'.format(
-                    id=centreline['id'],
-                    LDV_weight=emis_group_fractions[0, road.sourceid]
+                '({name_index} 0 {LDV_weight})'.format(
+                    name_index=road_name_index,
+                    LDV_weight=emis_grp_fractions[0, road.sourceid]
                 )
             )
             road_classification.append(
-                '({id} 1 {HDV_weight})'.format(
-                    id=centreline['id'],
-                    HDV_weight=emis_group_fractions[1, road.sourceid]
+                '({name_index} 1 {HDV_weight})'.format(
+                    name_index=road_name_index,
+                    HDV_weight=emis_grp_fractions[1, road.sourceid]
                 )
             )
+            road_name_index +=1 
             
         header = ofdict.DICT_HEADER.format(filename='trafficDict')
         content = ofdict.TRAFFIC_DICT_TEMPLATE.format(

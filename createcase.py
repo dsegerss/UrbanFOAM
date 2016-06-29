@@ -116,7 +116,7 @@ def main():
 
     parser.add_argument(
         '--buffer',
-        action='store', dest='buffer', default=DEFAULTS['buffer'],
+        action='store', type=float, dest='buffer', default=DEFAULTS['buffer'],
         help='Domain buffer width (meters), default=%(default)s'
     )
 
@@ -228,6 +228,12 @@ def main():
         help='First hour of emission timeseries'
     )
 
+    parser.add_argument(
+        '--translate', action='store', nargs=3, type=float,
+        dest='translate',
+        help='Translate STL (default is origo in centroid of domain)'
+    )
+
     # parser.add_argument(
     #     '-s', '--sources',
     #     action='store_true', dest='sources',
@@ -284,7 +290,10 @@ def main():
             log.info('Updated roads from edb')
             sys.exit(0)
     
-    case = Case()
+    case = Case(buffer=args.buffer)
+
+    if args.case is not None:
+        case.create_case(args.case)
 
     log.info('Reading geometry')
     case.read(con)
@@ -348,10 +357,12 @@ def main():
                 calculate_emission_group_fractions(
                     emis_ts
                 )
-            log.info('Writing constant/emissionTimeSeries.csv')
+            # convert to mg/s
+            emission_group_ts *= 1000.0
+            log.info('Writing constant/emissionTimeSeries_mg_per_s.csv')
             emission_group_ts.to_csv(
                 path_or_buf=path.join(
-                    args.case, 'constant', 'emissionTimeSeries.csv'
+                    args.case, 'constant', 'emissionTimeSeries_mg_per_s.csv'
                 ),
                 sep=b'\t',
                 index_label='Time',
@@ -360,17 +371,27 @@ def main():
             )
 
     if args.case is not None:
-        case.create_case(args.case)
         if args.emis_ts:
             log.info('Writing constant/trafficDict')
             case.write_traffic_dict(
                 edb_con,
                 emis_group_fractions,
-                path.join(args.case, 'constant', 'trafficDict')
+                path.join(args.case, 'constant', 'trafficDict'),
+                translate=args.translate
             )
 
+        case.write_landuse_dict(
+            path.join(args.case, 'constant', 'landuseDict')
+        )
+
         log.info('Creating stl-files')
-        case.to_stl(args.case)
+        if args.terrain is None:
+            log.error('Must specify terrain file to generate STL')
+            sys.exit(1)
+        case.to_stl(
+            path.join(args.case, 'constant', 'triSurface'),
+            translate=args.translate or case.distance_to_origo()
+        )
 
     
 if __name__ == '__main__':
